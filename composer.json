@@ -9,7 +9,8 @@
     "slim/php-view": "^3.4"
   },
   "scripts": {
-    "migrate": "php scripts/migrate.php"
+    "migrate": "php scripts/migrate.php",
+    "serve": "php -S localhost:8000 -t public"
   },
   "license": "MIT"
 }
