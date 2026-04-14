@@ -49,6 +49,36 @@ class Database
     }
   }
 
+  /**
+   * @param Closure(PDO): mixed $tr
+   */
+  public function runTransaction(Closure $tr): mixed
+  {
+    $conn = $this->getConnection();
+
+    if ($conn->inTransaction()) {
+      throw new RuntimeException(
+        "Las transacciones anidadas no están permitidas. No llames a runTransaction dentro de otra.",
+      );
+    }
+
+    try {
+      $conn->beginTransaction();
+
+      $result = $tr($conn);
+
+      $conn->commit();
+
+      return $result;
+    } catch (Throwable $e) {
+      if ($conn->inTransaction()) {
+        $conn->rollBack();
+      }
+
+      throw $e;
+    }
+  }
+
   private function buildDsn(string $port): string
   {
     if ($this->driver === 'pgsql') {
