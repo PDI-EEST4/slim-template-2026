@@ -45,7 +45,7 @@ class Database
 
       return $this->connection;
     } catch (PDOException $e) {
-      throw new \Exception("Fallo en la conexión a la base de datos");
+      throw new RuntimeException("Fallo en la conexión a la base de datos", 0, $e);
     }
   }
 
