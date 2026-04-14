@@ -9,6 +9,15 @@ require __DIR__ . '/../vendor/autoload.php';
 // Cargar variables de entorno desde el .env
 Dotenv::createImmutable(__DIR__ . '/..')->safeLoad();
 
+$env = $_ENV["APP_ENV"] ?? "prod";
+$allowedEnvs = ["dev", "prod"];
+
+if (!in_array($env, $allowedEnvs, true)) {
+  throw new RuntimeException("APP_ENV inválido: $env");
+}
+
+$debug = $env === "dev";
+
 // Crear la aplicacion de Slim
 $app = AppFactory::create();
 
@@ -19,5 +28,7 @@ $renderer = new PhpRenderer(__DIR__ . '/views');
 $app->get('/', function ($request, $response) use ($renderer) {
   return $renderer->render($response, 'index.php');
 });
+
+$app->addErrorMiddleware($debug, true, true);
 
 return $app;
