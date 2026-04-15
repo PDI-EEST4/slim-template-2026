@@ -12,5 +12,10 @@
     "migrate": "php scripts/migrate.php",
     "serve": "php -S localhost:8000 -t public"
   },
+  "autoload": {
+    "files": [
+      "./src/utils/html.php"
+    ]
+  },
   "license": "MIT"
 }
