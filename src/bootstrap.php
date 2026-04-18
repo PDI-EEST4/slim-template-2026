@@ -22,11 +22,14 @@ $debug = $env === "dev";
 $app = AppFactory::create();
 
 // Crear el motor de plantillas
-$renderer = new PhpRenderer(__DIR__ . '/views');
+$renderer = new PhpRenderer(
+  templatePath: __DIR__ . "/views",
+  attributes: ["title" => "PDI | Slim Template 2026"],
+);
 
 // Ruta/Vista principal
-$app->get('/', function ($request, $response) use ($renderer) {
-  return $renderer->render($response, 'index.php');
+$app->get("/", function ($request, $response) use ($renderer) {
+  return view($renderer, $response, "index.php");
 });
 
 $app->addErrorMiddleware($debug, true, true);
