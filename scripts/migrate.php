@@ -179,41 +179,92 @@ final class SqlMigrationRunner
   private function applyMigration(PDO $pdo, array $migration): void
   {
     $sql = file_get_contents($migration['path']);
-
+  
     if ($sql === false || trim($sql) === '') {
-      throw new RuntimeException('La migración ' . $migration['filename'] . ' está vacía o no se pudo leer.');
+      throw new RuntimeException(
+        'La migración ' . $migration['filename'] . ' está vacía o no se pudo leer.'
+      );
     }
-
+  
     fwrite(STDOUT, 'Aplicando ' . $migration['filename'] . "...\n");
-
-    $pdo->beginTransaction();
-
+  
+    $driver = $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+  
     try {
-      $pdo->exec($sql);
-
-      $stmt = $pdo->prepare(sprintf(
-        'INSERT INTO %s (filename) VALUES (:filename)',
-        self::MIGRATION_TABLE
-      ));
-
-      $stmt->execute([
-        'filename' => $migration['filename'],
-      ]);
-
-      $pdo->commit();
-
+      if ($driver === 'pgsql') {
+        $this->applyTransactionalMigration($pdo, $migration, $sql);
+      } elseif ($driver === 'mysql') {
+        $this->applyNonTransactionalMigration($pdo, $migration, $sql);
+      } else {
+        throw new RuntimeException(
+          'Driver PDO no soportado: ' . $driver
+        );
+      }
+  
       fwrite(STDOUT, 'Aplicada ' . $migration['filename'] . "\n");
     } catch (Throwable $throwable) {
-      if ($pdo->inTransaction()) {
-        $pdo->rollBack();
-      }
-
       throw new RuntimeException(
         'Error al aplicar ' . $migration['filename'] . ': ' . $throwable->getMessage(),
         0,
         $throwable
       );
     }
+  }
+  
+  /**
+   * PostgreSQL permite ejecutar DDL dentro de una transacción.
+   *
+   * @param array{filename: string, path: string} $migration
+   */
+  private function applyTransactionalMigration(
+    PDO $pdo,
+    array $migration,
+    string $sql
+  ): void {
+    $pdo->beginTransaction();
+  
+    try {
+      $pdo->exec($sql);
+  
+      $this->markMigrationAsApplied($pdo, $migration['filename']);
+  
+      $pdo->commit();
+    } catch (Throwable $throwable) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+  
+      throw $throwable;
+    }
+  }
+  
+  /**
+   * MySQL/MariaDB pueden hacer COMMIT implícitos al ejecutar DDL.
+   *
+   * Por eso la migración no se ejecuta dentro de una transacción.
+   *
+   * @param array{filename: string, path: string} $migration
+   */
+  private function applyNonTransactionalMigration(
+    PDO $pdo,
+    array $migration,
+    string $sql
+  ): void {
+    $pdo->exec($sql);
+  
+    $this->markMigrationAsApplied($pdo, $migration['filename']);
+  }
+  
+  private function markMigrationAsApplied(PDO $pdo, string $filename): void
+  {
+    $stmt = $pdo->prepare(sprintf(
+      'INSERT INTO %s (filename) VALUES (:filename)',
+      self::MIGRATION_TABLE
+    ));
+  
+    $stmt->execute([
+      'filename' => $filename,
+    ]);
   }
 }
 
