@@ -26,11 +26,21 @@ if (in_array('--help', $argv, true) || in_array('-h', $argv, true)) {
 final class SqlMigrationRunner
 {
   private const MIGRATION_TABLE = 'schema_migrations';
+  private MigrationStrategy $strategy;
 
   public function __construct(
     private readonly Database $database,
-    private readonly string $projectRoot
-  ) {}
+    private readonly string $projectRoot,
+  ) {
+    $mappings = [
+      "pgsql" => PostgresMigrationStrategy::class,
+      "mysql" => MySqlMigrationStrategy::class,
+    ];
+    $driver = $database->getDriver();
+    $pdo = $database->getConnection();
+
+    $this->strategy = new ($mappings[$driver])($pdo, self::MIGRATION_TABLE);
+  }
 
   public function run(): int
   {
@@ -42,7 +52,7 @@ final class SqlMigrationRunner
     }
 
     $pdo = $this->database->getConnection();
-    $this->ensureMigrationTable($pdo);
+    $this->strategy->ensureMigrationTable();
 
     $migrations = $this->loadMigrations($migrationDirectory);
 
@@ -51,10 +61,22 @@ final class SqlMigrationRunner
       return 0;
     }
 
-    $appliedMigrations = array_fill_keys($this->getAppliedMigrations($pdo), true);
+    $appliedMigrations = $this->getAppliedMigrations($pdo);
+
+    foreach ($migrations as $migration) {
+        if (!isset($appliedMigrations[$migration['filename']])) {
+            continue;
+        }
+
+        if ($migration['hash'] !== $appliedMigrations[$migration['filename']]) {
+            fwrite(STDERR, "⚠️  La migración {$migration['filename']} fue modificada después de aplicarse.\n");
+            return 1;
+        }
+    }
+
     $pendingMigrations = array_values(array_filter(
-      $migrations,
-      static fn(array $migration): bool => !isset($appliedMigrations[$migration['filename']])
+        $migrations,
+        static fn(array $migration): bool => !isset($appliedMigrations[$migration['filename']])
     ));
 
     if ($pendingMigrations === []) {
@@ -65,7 +87,7 @@ final class SqlMigrationRunner
     fwrite(STDOUT, "Aplicando migraciones desde: {$migrationDirectory}\n");
 
     foreach ($pendingMigrations as $migration) {
-      $this->applyMigration($pdo, $migration);
+      $this->applyMigration($migration);
     }
 
     fwrite(STDOUT, "Migraciones completadas correctamente.\n");
@@ -101,7 +123,7 @@ final class SqlMigrationRunner
   }
 
   /**
-   * @return array<int, array{filename: string, path: string}>
+   * @return array<int, array{filename: string, path: string, sql: string, hash: string}>
    */
   private function loadMigrations(string $migrationDirectory): array
   {
@@ -120,9 +142,19 @@ final class SqlMigrationRunner
         continue;
       }
 
+      $sql = file_get_contents($filePath);
+
+      if ($sql === false || trim($sql) === "") {
+        throw new RuntimeException(
+          "La migración " . basename($filePath) . " está vacía o no se pudo leer."
+        );
+      }
+
       $migrations[] = [
-        'filename' => basename($filePath),
-        'path' => $filePath,
+        "filename" => basename($filePath),
+        "path" => $filePath,
+        "sql" => $sql,
+        "hash" => hash("sha256", $sql),
       ];
     }
 
@@ -134,73 +166,32 @@ final class SqlMigrationRunner
    */
   private function getAppliedMigrations(PDO $pdo): array
   {
-    $stmt = $pdo->query(sprintf(
-      'SELECT filename FROM %s ORDER BY filename ASC',
-      self::MIGRATION_TABLE
-    ));
+    $stmt = $pdo->query(
+      sprintf("SELECT filename, hash FROM %s", self::MIGRATION_TABLE),
+    );
 
     if ($stmt === false) {
       return [];
     }
 
-    $filenames = $stmt->fetchAll(PDO::FETCH_COLUMN);
-
-    return array_map(static fn($filename): string => (string) $filename, $filenames);
-  }
-
-  private function ensureMigrationTable(PDO $pdo): void
-  {
-    $driver = $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
-
-    if ($driver === 'pgsql') {
-      $pdo->exec(sprintf(
-        'CREATE TABLE IF NOT EXISTS %s (
-                    filename VARCHAR(255) PRIMARY KEY,
-                    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )',
-        self::MIGRATION_TABLE
-      ));
-
-      return;
+    $applied = [];
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+      $applied[$row["filename"]] = $row["hash"];
     }
 
-    $pdo->exec(sprintf(
-      'CREATE TABLE IF NOT EXISTS %s (
-                filename VARCHAR(255) NOT NULL PRIMARY KEY,
-                applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )',
-      self::MIGRATION_TABLE
-    ));
+    return $applied;
   }
 
   /**
-   * @param array{filename: string, path: string} $migration
+   * @param array{filename: string, path: string, sql: string, hash: string} $migration
    */
-  private function applyMigration(PDO $pdo, array $migration): void
+  private function applyMigration(array $migration): void
   {
-    $sql = file_get_contents($migration['path']);
-  
-    if ($sql === false || trim($sql) === '') {
-      throw new RuntimeException(
-        'La migración ' . $migration['filename'] . ' está vacía o no se pudo leer.'
-      );
-    }
-  
     fwrite(STDOUT, 'Aplicando ' . $migration['filename'] . "...\n");
-  
-    $driver = $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
-  
+
     try {
-      if ($driver === 'pgsql') {
-        $this->applyTransactionalMigration($pdo, $migration, $sql);
-      } elseif ($driver === 'mysql') {
-        $this->applyNonTransactionalMigration($pdo, $migration, $sql);
-      } else {
-        throw new RuntimeException(
-          'Driver PDO no soportado: ' . $driver
-        );
-      }
-  
+      $this->strategy->applyMigration($migration["filename"], $migration["sql"], $migration["hash"]);
+
       fwrite(STDOUT, 'Aplicada ' . $migration['filename'] . "\n");
     } catch (Throwable $throwable) {
       throw new RuntimeException(
@@ -209,62 +200,6 @@ final class SqlMigrationRunner
         $throwable
       );
     }
-  }
-  
-  /**
-   * PostgreSQL permite ejecutar DDL dentro de una transacción.
-   *
-   * @param array{filename: string, path: string} $migration
-   */
-  private function applyTransactionalMigration(
-    PDO $pdo,
-    array $migration,
-    string $sql
-  ): void {
-    $pdo->beginTransaction();
-  
-    try {
-      $pdo->exec($sql);
-  
-      $this->markMigrationAsApplied($pdo, $migration['filename']);
-  
-      $pdo->commit();
-    } catch (Throwable $throwable) {
-      if ($pdo->inTransaction()) {
-        $pdo->rollBack();
-      }
-  
-      throw $throwable;
-    }
-  }
-  
-  /**
-   * MySQL/MariaDB pueden hacer COMMIT implícitos al ejecutar DDL.
-   *
-   * Por eso la migración no se ejecuta dentro de una transacción.
-   *
-   * @param array{filename: string, path: string} $migration
-   */
-  private function applyNonTransactionalMigration(
-    PDO $pdo,
-    array $migration,
-    string $sql
-  ): void {
-    $pdo->exec($sql);
-  
-    $this->markMigrationAsApplied($pdo, $migration['filename']);
-  }
-  
-  private function markMigrationAsApplied(PDO $pdo, string $filename): void
-  {
-    $stmt = $pdo->prepare(sprintf(
-      'INSERT INTO %s (filename) VALUES (:filename)',
-      self::MIGRATION_TABLE
-    ));
-  
-    $stmt->execute([
-      'filename' => $filename,
-    ]);
   }
 }
 

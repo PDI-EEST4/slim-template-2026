@@ -16,7 +16,8 @@
     "files": [
       "./src/utils/html.php",
       "./src/utils/view.php"
-    ]
+    ],
+    "classmap": ["scripts/strategies/"]
   },
   "license": "MIT"
 }
